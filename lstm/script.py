@@ -1,4 +1,3 @@
-import config
 import pandas as pd
 import numpy as np
 from string import punctuation
@@ -8,132 +7,182 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 import torch.nn as nn
 import csv
+from sentiment_lstm import SentimentLSTM
+from tqdm import tqdm
 
-from sentiment_model_define_class import SentimentLSTM
 
-
-def preprocess(df):
+def preprocess(df: pd.core.frame.DataFrame) -> None:
+    """ Preprocess dataset.
+        - text
+            - lowercase text
+            - remove punctuations
+        - sentiment
+            - remove neutral (1-3) values
+            - map to 0(neg) and 1(pos)
+    Args:
+        df (pd.core.frame.DataFrame): dataframe object
+    """
     # lowercase
-    df[2] = df[2].str.lower()
+    df.text = df.text.str.lower()
     # remove punctuation
-    df[2] = df[2].str.replace('[{}]'.format(punctuation), '')
+    df.text = df.text.str.replace('[{}]'.format(punctuation), '')
     # remove neutral (temp)
-    df.drop(df.loc[df[1] == "neutral"].index, inplace=True)
+    df.drop(df.loc[~df.sentiment.isin([0, 4])].index, inplace=True)
     # map labels (temp)
-    # df[1] = df[1].map({"neutral": 0, "positive": 1, "negative": -1})
-    df[1] = df[1].map({"positive": 1, "negative": 0})
+    df.sentiment = df.sentiment.map({0: 0, 4: 1})
 
 
-def plot(reviews_int: list) -> None:
-    reviews_len = [len(x) for x in reviews_int]
-    pd.Series(reviews_len).hist()
+def plot(tweets_int: list) -> None:
+    """ Plots distribution of tweet lengths and outputs some descriptive statistics. 
+        - text
+            - lowercase text
+            - remove punctuations
+        - sentiment
+            - remove neutral (1-3) values
+            - map to 0(neg) and 1(pos)
+    Args:
+        tweets_int (list): list consisting of the length of each tweet
+    """
+    tweets_len = [len(x) for x in tweets_int]
+    pd.Series(tweets_len).hist()
     plt.show()
-    print(pd.Series(reviews_len).describe())
+    print(pd.Series(tweets_len).describe())
 
 
-def pad_features(reviews_int, seq_length):
-    ''' Return features of review_ints, where each review is padded with 0's or truncated to the input seq_length.
-    '''
-    features = np.zeros((len(reviews_int), seq_length), dtype=int)
-    for i, review in enumerate(reviews_int):
-        review_len = len(review)
-        if review_len <= seq_length:
-            zeroes = list(np.zeros(seq_length - review_len))
-            new = zeroes + review
-        elif review_len > seq_length:
-            new = review[0:seq_length]
+def pad_features(tweets_int: list, seq_length: int) -> np.ndarray:
+    """ Returns features of tweet_ints, where each tweet is padded with 0's or truncated to the input seq_length.
+    Args:
+        tweets_int (list): list consisting of the length of each tweet
+        seq_length (int): length of features.
+    Returns:
+        np.ndarray: matrix of features padded with zeroes at the front.
+    """
+    features = np.zeros((len(tweets_int), seq_length), dtype=int)
+    for i, tweet in enumerate(tweets_int):
+        tweet_len = len(tweet)
+        if tweet_len <= seq_length:
+            zeroes = list(np.zeros(seq_length - tweet_len))
+            new = zeroes + tweet
+        elif tweet_len > seq_length:
+            new = tweet[0:seq_length]
         features[i, :] = np.array(new)
     return features
 
 
-def tokenize_review(test_review, vocab_to_int):
-    test_review = test_review.lower()  # lowercase
-    # get rid of punctuation
-    test_text = ''.join([c for c in test_review if c not in punctuation])
-
-    # splitting by spaces
-    test_words = test_text.split()
-
-    # tokens
-    test_ints = []
-    test_ints.append([vocab_to_int[word] for word in test_words])
-
-    return test_ints
+def preprocess_tweet(tweet: str) -> str:
+    """ Preprocess tweet
+        - text
+            - lowercase text
+            - remove punctuations
+    Args:
+        tweet (str): tweet to be evaluated
+    Returns:
+        str: preprocessed tweet
+    """
+    return ''.join([c for c in tweet.lower() if c not in punctuation])
 
 
-def predict(net, vocab_to_int, test_review, sequence_length=200):
+def tokenize_tweets(tweets: list, vocab_to_int: dict) -> list:
+    """ Tokenize tweets with vocab_to_int.
+    Args:
+        tweet (str): tweet to be evaluated
+        vocab_to_int (dict): dict of vocab mapped to their order based on word count
+    Returns:
+        list: a list tokenized tweets
+    """
+    return [tokenize_tweet(tweet, vocab_to_int) for tweet in tweets]
 
+
+def tokenize_tweet(tweet: str, vocab_to_int: dict) -> list:
+    """ Tokenize tweet with vocab_to_int.
+    Args:
+        tweet (str): tweet to be evaluated
+        vocab_to_int (dict): dict of vocab mapped to their order based on word count
+    Returns:
+        list: a tokenized tweet
+    """
+    return [vocab_to_int[word] for word in tweet.split()]
+
+
+def predict(net, vocab_to_int, tweet, sequence_length=200):
+    """ Predict sentiment of tweet based on model
+    Args:
+        net ():
+        vocab_to_int (int): length of features.
+        tweet (str): length of features.
+        sequence_length (int): length of features.
+    Returns:
+        np.ndarray: matrix of features padded with zeroes at the front.
+    """
     net.eval()
 
-    # tokenize review
-    test_ints = tokenize_review(test_review, vocab_to_int)
+    # Preprocess tweet
+    tweet = preprocess_tweet(tweet)
 
-    # pad tokenized sequence
-    seq_length = sequence_length
-    features = pad_features(test_ints, seq_length)
+    # Tokenize tweet
+    tweets_int = tokenize_tweets([tweet], vocab_to_int)
 
-    # convert to tensor to pass into your model
+    # Create padded features.
+    features = pad_features(tweets_int, sequence_length)
+
+    # Convert to tensor
     feature_tensor = torch.from_numpy(features)
 
+    # Initialize hidden state
     batch_size = feature_tensor.size(0)
-
-    # initialize hidden state
     h = net.init_hidden(batch_size)
-
-    if(config.train_on_gpu):
-        feature_tensor = feature_tensor.cuda()
 
     # get the output from the model
     output, h = net(feature_tensor, h)
 
-    # convert output probabilities to predicted class (0 or 1)
+    # convert output negative or positive (0 or 1)
     pred = torch.round(output.squeeze())
+
     # printing output value, before rounding
     print('Prediction value, pre-rounding: {:.6f}'.format(output.item()))
 
     # print custom response
     if(pred.item() == 1):
-        print("Positive review detected!")
+        print("Positive tweet detected!")
     else:
-        print("Negative review detected.")
+        print("Negative tweet detected.")
 
 
-def longest_text(x):
-    mx = 0
-    idx = 0
-    for i, v in enumerate(x):
-        l = len(v.split())
-        if l > mx:
-            mx = l
-            idx = i
-    return x[idx]
+def save_model(filepath, model) -> None:
+    torch.save(model.state_dict(), filepath)
+
+
+def load_model(filepath, model) -> None:
+    model.load_state_dict(torch.load(filepath))
 
 
 def main():
-    df = pd.read_csv('data/data.txt',
-                     sep='\t', header=None, usecols=[0, 1, 2], quoting=csv.QUOTE_NONE)
+    # Load Data and preprocess
+    headers = ["sentiment", "text"]
+    df = pd.read_csv('data/data.csv', header=None,
+                     names=headers, usecols=[0, 5], encoding='latin-1')
     preprocess(df)
 
-    reviews = df[2].to_list()
-    labels = df[1].to_numpy()
-
-    sorted_words = Counter(df[2].str.split(
+    # Tokenize: Vocab to int mapping ordered based on count
+    sorted_words = Counter(df.text.str.split(
         expand=True).stack().value_counts().to_dict()).most_common()
-
     vocab_to_int = {w: i for i, (w, c) in enumerate(sorted_words)}
 
-    reviews_int = []
-    for review in reviews:
-        reviews_int.append([vocab_to_int[w] for w in review.split()])
+    # Extract tweets and labels
+    tweets = df.text.to_list()
+    labels = df.sentiment.to_numpy()
 
-    # plot(reviews_int)
+    # maps each word in a tweet to its vocab_to_int mapping.
+    tweets_int = tokenize_tweets(tweets, vocab_to_int)
 
-    seq_length = 40
+    # plot(tweets_int)
 
-    features = pad_features(reviews_int, seq_length)
+    # Create padded features.
+    seq_length = 50
+    features = pad_features(tweets_int, seq_length)
 
+    # Create training, validation, and test dataset.
     len_feat = len(features)
-
     split_frac = 0.8
 
     train_x = features[0:int(split_frac * len_feat)]
@@ -156,9 +205,8 @@ def main():
     test_data = TensorDataset(torch.from_numpy(
         test_x), torch.from_numpy(test_y))
 
-    # dataloaders
-    batch_size = 50
-    # make sure to SHUFFLE your data
+    # Loads, shuffles, and batches data.
+    batch_size = 32
     train_loader = DataLoader(train_data, shuffle=True,
                               batch_size=batch_size, drop_last=True)
     valid_loader = DataLoader(valid_data, shuffle=True,
@@ -166,102 +214,90 @@ def main():
     test_loader = DataLoader(test_data, shuffle=True,
                              batch_size=batch_size, drop_last=True)
 
-    # obtain one batch of training data
-    dataiter = iter(train_loader)
-    sample_x, sample_y = dataiter.next()
-    print('Sample input size: ', sample_x.size())  # batch_size, seq_length
-    print('Sample input: \n', sample_x)
-    print()
-    print('Sample label size: ', sample_y.size())  # batch_size
-    print('Sample label: \n', sample_y)
-
     # Instantiate the model w/ hyperparams
     vocab_size = len(vocab_to_int) + 1  # +1 for the 0 padding
     output_size = 1
-    embedding_dim = 50
-    hidden_dim = 256
+    embedding_dim = 32
+    hidden_dim = 64
     n_layers = 2
     net = SentimentLSTM(vocab_size, output_size,
                         embedding_dim, hidden_dim, n_layers)
 
     # loss and optimization functions
-    lr = 0.001
-
     criterion = nn.BCELoss()
-    optimizer = torch.optim.Adam(net.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
 
     # training params
-
     epochs = 4  # 3-4 is approx where I noticed the validation loss stop decreasing
-
-    counter = 0
-    print_every = 100
     clip = 5  # gradient clipping
 
-    # move model to GPU, if available
-    if(config.train_on_gpu):
-        net.cuda()
-
     net.train()
+
     # train for some number of epochs
+    outer = tqdm(total=epochs, desc="Epoch", position=0)
     for e in range(epochs):
         # initialize hidden state
         h = net.init_hidden(batch_size)
 
         # batch loop
+        train_inner = tqdm(total=len(train_loader.dataset),
+                           desc="Batch: Train", position=0)
         for inputs, labels in train_loader:
-            counter += 1
-
-            if(config.train_on_gpu):
-                inputs, labels = inputs.cuda(), labels.cuda()
 
             # Creating new variables for the hidden state, otherwise
             # we'd backprop through the entire training history
             h = tuple([each.data for each in h])
 
-            # zero accumulated gradients
+            # Step 1. Remember that Pytorch accumulates gradients.
+            # We need to clear them out before each instance
             net.zero_grad()
 
-            # get the output from the model
+            # Step 2. Get our inputs ready for the network, that is, turn them into
+            # Tensors of word indices.
             inputs = inputs.type(torch.LongTensor)
+
+            # Step 3. Run our forward pass.
             output, h = net(inputs, h)
 
-            # calculate the loss and perform backprop
+            # Step 4. Compute the loss, gradients, and update the parameters by
+            #  calling optimizer.step()
             loss = criterion(output.squeeze(), labels.float())
             loss.backward()
             # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
             nn.utils.clip_grad_norm_(net.parameters(), clip)
             optimizer.step()
 
-            # loss stats
-            if counter % print_every == 0:
-                # Get validation loss
-                val_h = net.init_hidden(batch_size)
-                val_losses = []
-                net.eval()
-                for inputs, labels in valid_loader:
+            train_inner.update()
 
-                    # Creating new variables for the hidden state, otherwise
-                    # we'd backprop through the entire training history
-                    val_h = tuple([each.data for each in val_h])
+        # Get validation loss
+        val_h = net.init_hidden(batch_size)
+        val_losses = []
+        net.eval()
 
-                    if(config.train_on_gpu):
-                        inputs, labels = inputs.cuda(), labels.cuda()
+        valid_inner = tqdm(total=len(valid_loader.dataset),
+                           desc="Batch: Validation", position=0)
+        for inputs, labels in valid_loader:
 
-                    inputs = inputs.type(torch.LongTensor)
-                    output, val_h = net(inputs, val_h)
-                    val_loss = criterion(output.squeeze(), labels.float())
+            # Creating new variables for the hidden state, otherwise
+            # we'd backprop through the entire training history
+            val_h = tuple([each.data for each in val_h])
 
-                    val_losses.append(val_loss.item())
+            inputs = inputs.type(torch.LongTensor)
+            output, val_h = net(inputs, val_h)
+            val_loss = criterion(output.squeeze(), labels.float())
 
-                net.train()
-                print("Epoch: {}/{}...".format(e + 1, epochs),
-                      "Step: {}...".format(counter),
-                      "Loss: {:.6f}...".format(loss.item()),
-                      "Val Loss: {:.6f}".format(np.mean(val_losses)))
+            val_losses.append(val_loss.item())
+
+            valid_inner.update()
+
+        net.train()
+        print("Epoch: {}/{}...".format(e + 1, epochs),
+              "Loss: {:.6f}...".format(loss.item()),
+              "Val Loss: {:.6f}".format(np.mean(val_losses)))
+
+        outer.update()
 
     # Get test data loss and accuracy
-
     test_losses = []  # track loss
     num_correct = 0
 
@@ -270,14 +306,13 @@ def main():
 
     net.eval()
     # iterate over test data
+    test_inner = tqdm(total=len(test_loader.dataset),
+                      desc="Batch: Test", position=0)
     for inputs, labels in test_loader:
 
         # Creating new variables for the hidden state, otherwise
         # we'd backprop through the entire training history
         h = tuple([each.data for each in h])
-
-        if(config.train_on_gpu):
-            inputs, labels = inputs.cuda(), labels.cuda()
 
         # get predicted outputs
         inputs = inputs.type(torch.LongTensor)
@@ -292,9 +327,10 @@ def main():
 
         # compare predictions to true label
         correct_tensor = pred.eq(labels.float().view_as(pred))
-        correct = np.squeeze(correct_tensor.numpy(
-        )) if not config.train_on_gpu else np.squeeze(correct_tensor.cpu().numpy())
+        correct = np.squeeze(correct_tensor.numpy())
         num_correct += np.sum(correct)
+
+        test_inner.update()
 
     # -- stats! -- ##
     # avg test loss
@@ -304,8 +340,12 @@ def main():
     test_acc = num_correct / len(test_loader.dataset)
     print("Test accuracy: {:.3f}".format(test_acc))
 
-    test_review = 'This movie had the best acting and the dialogue was so good. I loved it.'
-    predict(net, vocab_to_int, test_review, seq_length)
+    model_path = "model/model.pt"
+    save_model(net)
+    print("Saving model")
+
+    tweet = 'This movie had the best acting and the dialogue was so good. I loved it.'
+    predict(net, vocab_to_int, tweet, seq_length)
 
 
 if __name__ == "__main__":

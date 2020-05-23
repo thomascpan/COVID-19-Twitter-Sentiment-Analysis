@@ -1,4 +1,3 @@
-import config
 import torch.nn as nn
 
 class SentimentLSTM(nn.Module):
@@ -61,13 +60,7 @@ class SentimentLSTM(nn.Module):
         # Create two new tensors with sizes n_layers x batch_size x hidden_dim,
         # initialized to zero, for hidden state and cell state of LSTM
         weight = next(self.parameters()).data
-        
-        if (config.train_on_gpu):
-            hidden = (weight.new(self.n_layers, batch_size, self.hidden_dim).zero_().cuda(),
-                  weight.new(self.n_layers, batch_size, self.hidden_dim).zero_().cuda())
-        else:
-            hidden = (weight.new(self.n_layers, batch_size, self.hidden_dim).zero_(),
-                      weight.new(self.n_layers, batch_size, self.hidden_dim).zero_())
-        
+        hidden = (weight.new(self.n_layers, batch_size, self.hidden_dim).zero_(),
+                  weight.new(self.n_layers, batch_size, self.hidden_dim).zero_())
         return hidden
         
