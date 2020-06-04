@@ -69,6 +69,31 @@ def pad_features(tweets_int: list, seq_length: int) -> np.ndarray:
     return features
 
 
+def sample_features_and_labels(features: np.ndarray, labels: np.ndarray, percent: int) -> (np.ndarray, np.ndarray):
+    """ Randomly samples from features.
+    Args:
+        features (np.ndarray): list consisting of the length of each tweet
+        percent (float): percent of features to sample (decimal)
+    Returns:
+        np.ndarray: sampled features
+    """
+    n = features.shape[0]
+    size = int(n * percent)
+    rand_indices = np.random.choice(n, size=size, replace=False)
+    return (features[rand_indices, :], labels[rand_indices])
+
+
+def sample_predictions(df: pd.core.frame.DataFrame, n: int) -> pd.core.frame.DataFrame:
+    """ Randomly sample from predictions.
+    Args:
+        df (pd.core.frame.DataFrame): df of predictions
+        n (float): number of samples
+    Returns:
+        np.ndarray: sampled features
+    """
+    return df.sample(n)
+
+
 def preprocess_tweet(tweet: str) -> str:
     """ Preprocess tweet
         - text
@@ -101,7 +126,7 @@ def tokenize_tweet(tweet: str, vocab_to_int: dict) -> list:
     Returns:
         list: a tokenized tweet
     """
-    return [vocab_to_int[word] for word in tweet.split()]
+    return [vocab_to_int.get(word, 0) for word in tweet.split()]
 
 
 def predict(net, vocab_to_int, tweet, sequence_length=200):
@@ -138,14 +163,7 @@ def predict(net, vocab_to_int, tweet, sequence_length=200):
     # convert output negative or positive (0 or 1)
     pred = torch.round(output.squeeze())
 
-    # printing output value, before rounding
-    print('Prediction value, pre-rounding: {:.6f}'.format(output.item()))
-
-    # print custom response
-    if(pred.item() == 1):
-        print("Positive tweet detected!")
-    else:
-        print("Negative tweet detected.")
+    return int(pred.item())
 
 
 def save_model(filepath, model) -> None:
@@ -154,6 +172,38 @@ def save_model(filepath, model) -> None:
 
 def load_model(filepath, model) -> None:
     model.load_state_dict(torch.load(filepath))
+
+
+def precision(tp, fp) -> float:
+    return tp / (tp + fp)
+
+
+def recall(tp, fn) -> float:
+    return tp / (tp + fn)
+
+
+def f1(precision, recall) -> float:
+    return 2 * (precision * recall) / (precision + recall)
+
+
+def predict_task(net, vocab_to_int, seq_length, filepath):
+    tqdm.pandas()
+    read_columns = ["created_at", "text", "lang"]
+    write_columns = ["created_at", "text"]
+
+    df = pd.read_csv(filepath, usecols=read_columns)
+    mask = ((df.text.str.len() <= 140) & (df.lang == "en"))
+    df = df.loc[mask]
+    df.created_at = pd.to_datetime(df['created_at'])
+    df.index = pd.to_datetime(df['created_at'], format='%m/%d/%y %I:%M%p')
+    sampled_df = sample_predictions(df, 10)
+    df["sentiment"] = df.progress_apply(lambda row: predict(
+        net, vocab_to_int, row["text"], seq_length), axis=1)
+    sampled_df["sentiment"] = sampled_df.progress_apply(lambda row: predict(
+        net, vocab_to_int, row["text"], seq_length), axis=1)
+    print(df.groupby([df.index.month, df.sentiment]).agg({'count'}))
+    sampled_df.to_csv("results/sampled_results.csv", index=False)
+    print(sampled_df)
 
 
 def main():
@@ -166,11 +216,11 @@ def main():
     # Tokenize: Vocab to int mapping ordered based on count
     sorted_words = Counter(df.text.str.split(
         expand=True).stack().value_counts().to_dict()).most_common()
-    vocab_to_int = {w: i for i, (w, c) in enumerate(sorted_words)}
+    vocab_to_int = {w: i for i, (w, c) in enumerate(sorted_words, 1)}
 
     # Extract tweets and labels
     tweets = df.text.to_list()
-    labels = df.sentiment.to_numpy()
+    tweet_labels = df.sentiment.to_numpy()
 
     # maps each word in a tweet to its vocab_to_int mapping.
     tweets_int = tokenize_tweets(tweets, vocab_to_int)
@@ -181,15 +231,18 @@ def main():
     seq_length = 50
     features = pad_features(tweets_int, seq_length)
 
+    sampled_features, sampled_labels = sample_features_and_labels(
+        features, tweet_labels, 0.10)
+
     # Create training, validation, and test dataset.
-    len_feat = len(features)
+    len_feat = len(sampled_features)
     split_frac = 0.8
 
-    train_x = features[0:int(split_frac * len_feat)]
-    train_y = labels[0:int(split_frac * len_feat)]
+    train_x = sampled_features[0:int(split_frac * len_feat)]
+    train_y = sampled_labels[0:int(split_frac * len_feat)]
 
-    remaining_x = features[int(split_frac * len_feat):]
-    remaining_y = labels[int(split_frac * len_feat):]
+    remaining_x = sampled_features[int(split_frac * len_feat):]
+    remaining_y = sampled_labels[int(split_frac * len_feat):]
 
     valid_x = remaining_x[0:int(len(remaining_x) * 0.5)]
     valid_y = remaining_y[0:int(len(remaining_y) * 0.5)]
@@ -234,14 +287,14 @@ def main():
     net.train()
 
     # train for some number of epochs
-    outer = tqdm(total=epochs, desc="Epoch", position=0)
+    epoch_pbar = tqdm(total=epochs, desc="Epoch", position=0)
     for e in range(epochs):
         # initialize hidden state
         h = net.init_hidden(batch_size)
 
         # batch loop
-        train_inner = tqdm(total=len(train_loader.dataset),
-                           desc="Batch: Train", position=0)
+        train_pbar = tqdm(total=len(train_loader.dataset),
+                          desc="Batch: Train", position=1)
         for inputs, labels in train_loader:
 
             # Creating new variables for the hidden state, otherwise
@@ -267,15 +320,15 @@ def main():
             nn.utils.clip_grad_norm_(net.parameters(), clip)
             optimizer.step()
 
-            train_inner.update()
+            train_pbar.update(batch_size)
 
         # Get validation loss
         val_h = net.init_hidden(batch_size)
         val_losses = []
         net.eval()
 
-        valid_inner = tqdm(total=len(valid_loader.dataset),
-                           desc="Batch: Validation", position=0)
+        validation_pbar = tqdm(total=len(valid_loader.dataset),
+                               desc="Batch: Validation", position=2)
         for inputs, labels in valid_loader:
 
             # Creating new variables for the hidden state, otherwise
@@ -288,26 +341,35 @@ def main():
 
             val_losses.append(val_loss.item())
 
-            valid_inner.update()
+            validation_pbar.update(batch_size)
 
         net.train()
-        print("Epoch: {}/{}...".format(e + 1, epochs),
-              "Loss: {:.6f}...".format(loss.item()),
-              "Val Loss: {:.6f}".format(np.mean(val_losses)))
 
-        outer.update()
+        epoch_pbar.write("Epoch: {}/{}...".format(e + 1, epochs))
+        epoch_pbar.write("Loss: {:.6f}...".format(loss.item()))
+        epoch_pbar.write("Val Loss: {:.6f}".format(np.mean(val_losses)))
+
+        epoch_pbar.update()
+
+    epoch_pbar.close()
+    train_pbar.close()
+    validation_pbar.close()
 
     # Get test data loss and accuracy
     test_losses = []  # track loss
     num_correct = 0
+    tp = 0
+    fp = 0
+    tn = 0
+    fn = 0
 
-    # init hidden state
+    # # init hidden state
     h = net.init_hidden(batch_size)
 
     net.eval()
     # iterate over test data
-    test_inner = tqdm(total=len(test_loader.dataset),
-                      desc="Batch: Test", position=0)
+    test_pbar = tqdm(total=len(test_loader.dataset),
+                     desc="Batch: Test", position=4)
     for inputs, labels in test_loader:
 
         # Creating new variables for the hidden state, otherwise
@@ -326,26 +388,37 @@ def main():
         pred = torch.round(output.squeeze())  # rounds to the nearest integer
 
         # compare predictions to true label
-        correct_tensor = pred.eq(labels.float().view_as(pred))
+        label_tensor = labels.float().view_as(pred)
+        correct_tensor = pred.eq(label_tensor)
         correct = np.squeeze(correct_tensor.numpy())
         num_correct += np.sum(correct)
 
-        test_inner.update()
+        tp += ((correct_tensor == 1) & (label_tensor == 1)).numpy().sum()
+        fp += ((correct_tensor == 1) & (label_tensor == 0)).numpy().sum()
+        tn += ((correct_tensor == 0) & (label_tensor == 0)).numpy().sum()
+        fn += ((correct_tensor == 0) & (label_tensor == 1)).numpy().sum()
 
-    # -- stats! -- ##
-    # avg test loss
-    print("Test loss: {:.3f}".format(np.mean(test_losses)))
+        test_pbar.update(batch_size)
 
     # accuracy over all test data
     test_acc = num_correct / len(test_loader.dataset)
-    print("Test accuracy: {:.3f}".format(test_acc))
-
+    precision_score = precision(tp, fp)
+    recall_score = recall(tp, fn)
+    f1_score = f1(precision_score, recall_score)
     model_path = "model/model.pt"
-    save_model(net)
-    print("Saving model")
+    save_model(model_path, net)
 
-    tweet = 'This movie had the best acting and the dialogue was so good. I loved it.'
-    predict(net, vocab_to_int, tweet, seq_length)
+    # avg test loss
+    test_pbar.write("Test loss: {:.3f}".format(np.mean(test_losses)))
+    test_pbar.write("Test accuracy: {:.3f}".format(test_acc))
+    test_pbar.write("Precision: {:.3f}".format(precision_score))
+    test_pbar.write("Recall: {:.3f}".format(recall_score))
+    test_pbar.write("F1: {:.3f}".format(f1_score))
+    test_pbar.write("Saving model")
+
+    test_pbar.close()
+
+    predict_task(net, vocab_to_int, seq_length, "data/final.csv")
 
 
 if __name__ == "__main__":
