@@ -129,25 +129,20 @@ def tokenize_tweet(tweet: str, vocab_to_int: dict) -> list:
     return [vocab_to_int.get(word, 0) for word in tweet.split()]
 
 
-def predict(net, vocab_to_int, tweet, sequence_length=200):
+def predict(net: SentimentLSTM, vocab_to_int: dict, tweet: str, sequence_length=200) -> int:
     """ Predict sentiment of tweet based on model
     Args:
-        net ():
+        net (SentimentLSTM): LSTM model
         vocab_to_int (int): length of features.
         tweet (str): length of features.
         sequence_length (int): length of features.
     Returns:
-        np.ndarray: matrix of features padded with zeroes at the front.
+        int: sentiment predition
     """
     net.eval()
 
-    # Preprocess tweet
     tweet = preprocess_tweet(tweet)
-
-    # Tokenize tweet
     tweets_int = tokenize_tweets([tweet], vocab_to_int)
-
-    # Create padded features.
     features = pad_features(tweets_int, sequence_length)
 
     # Convert to tensor
@@ -157,36 +152,74 @@ def predict(net, vocab_to_int, tweet, sequence_length=200):
     batch_size = feature_tensor.size(0)
     h = net.init_hidden(batch_size)
 
-    # get the output from the model
+    # Model output
     output, h = net(feature_tensor, h)
 
-    # convert output negative or positive (0 or 1)
+    # Convert ot positive or negative (1 or 0)
     pred = torch.round(output.squeeze())
 
     return int(pred.item())
 
 
-def save_model(filepath, model) -> None:
+def save_model(filepath: str, model: SentimentLSTM) -> None:
+    """ Saves model
+    Args:
+        filepath (str): path of where to save the model.
+        model (SentimentLSTM): LSTM model
+    """
     torch.save(model.state_dict(), filepath)
 
 
-def load_model(filepath, model) -> None:
+def load_model(filepath: str, model: SentimentLSTM) -> None:
+    """ Loads model
+    Args:
+        filepath (str): path of where to load the model.
+        model (SentimentLSTM): LSTM model
+    """
     model.load_state_dict(torch.load(filepath))
 
 
-def precision(tp, fp) -> float:
+def precision(tp: int, fp: int) -> float:
+    """ Calculates precision
+    Args:
+        tp (int): true positives
+        fp (int): false positives
+    Returns:
+        float: returns precision
+    """
     return tp / (tp + fp)
 
 
 def recall(tp, fn) -> float:
+    """ Calculates recall
+    Args:
+        tp (int): true positives
+        fn (int): false negatives
+    Returns:
+        float: returns recall
+    """
     return tp / (tp + fn)
 
 
-def f1(precision, recall) -> float:
+def f1(precision: float, recall: float) -> float:
+    """ Calculates F1 score
+    Args:
+        precision (float): precision
+        recall (float): recall
+    Returns:
+        float: returns F1 score
+    """
     return 2 * (precision * recall) / (precision + recall)
 
 
-def predict_task(net, vocab_to_int, seq_length, filepath):
+def predict_task(net: SentimentLSTM, vocab_to_int: dict, seq_length: int, filepath: str, output_path: str = "results/sampled_results.csv") -> None:
+    """ Predicts the sentiment of a dataset. Prints count grouped by month and sentiment. Prints 10 text and classification of 10 randomly sampled tweets. 
+    Args:
+        net (SentimentLSTM): LSTM model
+        vocab_to_int (int): length of features.
+        sequence_length (int): length of features.
+        filepath (str): path of data to predict.
+    """
     tqdm.pandas()
     read_columns = ["created_at", "text", "lang"]
     write_columns = ["created_at", "text"]
@@ -202,7 +235,7 @@ def predict_task(net, vocab_to_int, seq_length, filepath):
     sampled_df["sentiment"] = sampled_df.progress_apply(lambda row: predict(
         net, vocab_to_int, row["text"], seq_length), axis=1)
     print(df.groupby([df.index.month, df.sentiment]).agg({'count'}))
-    sampled_df.to_csv("results/sampled_results.csv", index=False)
+    sampled_df.to_csv(output_path, index=False)
     print(sampled_df)
 
 
@@ -213,26 +246,19 @@ def main():
                      names=headers, usecols=[0, 5], encoding='latin-1')
     preprocess(df)
 
-    # Tokenize: Vocab to int mapping ordered based on count
+    # Embed tweets
     sorted_words = Counter(df.text.str.split(
         expand=True).stack().value_counts().to_dict()).most_common()
     vocab_to_int = {w: i for i, (w, c) in enumerate(sorted_words, 1)}
-
-    # Extract tweets and labels
     tweets = df.text.to_list()
     tweet_labels = df.sentiment.to_numpy()
-
-    # maps each word in a tweet to its vocab_to_int mapping.
     tweets_int = tokenize_tweets(tweets, vocab_to_int)
-
-    # plot(tweets_int)
-
-    # Create padded features.
     seq_length = 50
     features = pad_features(tweets_int, seq_length)
-
     sampled_features, sampled_labels = sample_features_and_labels(
         features, tweet_labels, 0.10)
+
+    # plot(tweets_int)
 
     # Create training, validation, and test dataset.
     len_feat = len(sampled_features)
@@ -276,23 +302,22 @@ def main():
     net = SentimentLSTM(vocab_size, output_size,
                         embedding_dim, hidden_dim, n_layers)
 
-    # loss and optimization functions
+    # Loss and ptimization functions
     criterion = nn.BCELoss()
     optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
 
-    # training params
-    epochs = 4  # 3-4 is approx where I noticed the validation loss stop decreasing
-    clip = 5  # gradient clipping
+    # Training params
+    epochs = 4
+    clip = 5
 
     net.train()
 
-    # train for some number of epochs
+    # Train for some number of epochs
     epoch_pbar = tqdm(total=epochs, desc="Epoch", position=0)
     for e in range(epochs):
-        # initialize hidden state
+        # Initialize hidden state
         h = net.init_hidden(batch_size)
 
-        # batch loop
         train_pbar = tqdm(total=len(train_loader.dataset),
                           desc="Batch: Train", position=1)
         for inputs, labels in train_loader:
@@ -355,15 +380,15 @@ def main():
     train_pbar.close()
     validation_pbar.close()
 
-    # Get test data loss and accuracy
-    test_losses = []  # track loss
+    # Initialize test metrics
+    test_losses = []
     num_correct = 0
     tp = 0
     fp = 0
     tn = 0
     fn = 0
 
-    # # init hidden state
+    # Init hidden state
     h = net.init_hidden(batch_size)
 
     net.eval()
@@ -376,18 +401,18 @@ def main():
         # we'd backprop through the entire training history
         h = tuple([each.data for each in h])
 
-        # get predicted outputs
+        # Model output
         inputs = inputs.type(torch.LongTensor)
         output, h = net(inputs, h)
 
-        # calculate loss
+        # Calculate loss
         test_loss = criterion(output.squeeze(), labels.float())
         test_losses.append(test_loss.item())
 
-        # convert output probabilities to predicted class (0 or 1)
+        # Convert ot positive or negative (1 or 0)
         pred = torch.round(output.squeeze())  # rounds to the nearest integer
 
-        # compare predictions to true label
+        # Count number of correctly classified tweets
         label_tensor = labels.float().view_as(pred)
         correct_tensor = pred.eq(label_tensor)
         correct = np.squeeze(correct_tensor.numpy())
@@ -400,7 +425,7 @@ def main():
 
         test_pbar.update(batch_size)
 
-    # accuracy over all test data
+    # Calculate test metrics
     test_acc = num_correct / len(test_loader.dataset)
     precision_score = precision(tp, fp)
     recall_score = recall(tp, fn)
@@ -408,7 +433,7 @@ def main():
     model_path = "model/model.pt"
     save_model(model_path, net)
 
-    # avg test loss
+    # Output metrics
     test_pbar.write("Test loss: {:.3f}".format(np.mean(test_losses)))
     test_pbar.write("Test accuracy: {:.3f}".format(test_acc))
     test_pbar.write("Precision: {:.3f}".format(precision_score))
